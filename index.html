@@ -636,39 +636,65 @@ async function speakText(text) {
     setStatus(`说话中... ${boundaries.length} 个词边界, ${items.length} 个 viseme`);
 
   } catch (err) {
-    console.warn('Edge TTS failed:', err);
-    setStatus(`TTS 失败，重试中...`);
-    // 兜底：尝试 Web Speech Synthesis API
+    console.warn('Edge TTS failed (headless Chrome limitation, works in real browsers):', err);
+    setStatus('🔊 使用浏览器语音后备...');
+    // 兜底：Speech Synthesis API + 手动估算 viseme 时间
     const ctx = getAudioContext();
     try {
-      // 使用 SpeechSynthesis + 估算的 viseme 时间
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = 'zh-CN';
       utterance.rate = 1.1;
-      // 估算 viseme
-      const estimatedItems = [];
-      const chars = text.split('');
-      const totalDur = chars.length * 100; // ~100ms per char
-      const perChar = totalDur / chars.length;
-      chars.forEach((ch, i) => {
-        estimatedItems.push({ visemeType: visemeForToken(ch), startMs: Math.round(i * perChar), durationMs: Math.max(60, Math.round(perChar)) });
-      });
-      estimatedItems.push({ visemeType: 'sil', startMs: totalDur, durationMs: 200 });
+      utterance.pitch = 1.0;
 
-      // 用 silent audio buffer 驱动时间
+      // 估算 viseme 节奏
+      const chars = text.split('');
+      const totalDur = Math.max(chars.length * 110, 800); // ~110ms per char, min 800ms
+      const perChar = totalDur / Math.max(chars.length, 1);
+      const estimatedItems = [];
+      chars.forEach((ch, i) => {
+        estimatedItems.push({
+          visemeType: visemeForToken(ch),
+          startMs: Math.round(i * perChar),
+          durationMs: Math.max(60, Math.round(perChar))
+        });
+      });
+      // 结尾闭嘴
+      const lastEnd = estimatedItems.length > 0 ?
+        estimatedItems[estimatedItems.length-1].startMs + estimatedItems[estimatedItems.length-1].durationMs : totalDur;
+      estimatedItems.push({ visemeType: 'sil', startMs: lastEnd, durationMs: 300 });
+
+      // 用 silent AudioBuffer 驱动唇同步计时器
       const sr = ctx.sampleRate;
-      const silentBuf = ctx.createBuffer(1, Math.round(sr * (totalDur + 200) / 1000), sr);
+      const totalSamples = Math.round(sr * (totalDur + 500) / 1000);
+      const silentBuf = ctx.createBuffer(1, totalSamples, sr);
       startLipSync(estimatedItems, silentBuf);
+
+      // 播放浏览器语音
+      utterance.onstart = () => {
+        setStatus(`🔊 说话中... (${chars.length}字, 浏览器语音)`);
+      };
+      utterance.onend = () => {
+        setTimeout(() => {
+          stopLipSync();
+          setStatus('说话完成');
+          isSpeaking = false;
+          updateSendBtn();
+        }, 400);
+      };
+      utterance.onerror = (e) => {
+        console.warn('SpeechSynthesis error:', e);
+        stopLipSync();
+        setStatus('⚠️ 语音合成失败');
+        isSpeaking = false;
+        updateSendBtn();
+      };
 
       window.speechSynthesis.cancel();
       window.speechSynthesis.speak(utterance);
 
-      utterance.onend = () => {
-        setTimeout(() => stopLipSync(), 300);
-      };
     } catch (e2) {
       console.error('Both TTS failed:', e2);
-      setStatus('语音合成失败');
+      setStatus('❌ 语音合成失败');
       isSpeaking = false;
       updateSendBtn();
     }
