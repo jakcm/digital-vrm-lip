@@ -189,6 +189,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // ════════════════════════════════════════════════════════════
 // 1. DOM 引用
@@ -724,6 +725,8 @@ async function speakWithAI(text) {
     if (!apiKey) {
       // 没配 API Key 就直接朗读
       isWaitingAI = false;
+      isSpeaking = false;
+      updateSendBtn();
       await speakText(text);
       return;
     }
@@ -748,6 +751,8 @@ async function speakWithAI(text) {
 
     if (!resp.ok) {
       isWaitingAI = false;
+      isSpeaking = false;
+      updateSendBtn();
       await speakText(text);
       return;
     }
@@ -756,10 +761,14 @@ async function speakWithAI(text) {
     const reply = data.choices?.[0]?.message?.content?.trim() || text;
     addMessage(reply, 'assistant');
     isWaitingAI = false;
+    isSpeaking = false;
+    updateSendBtn();
     await speakText(reply);
   } catch (err) {
     console.warn('AI chat failed:', err);
     isWaitingAI = false;
+    isSpeaking = false;
+    updateSendBtn();
     await speakText(text);
   }
 }
@@ -782,6 +791,15 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 viewport.appendChild(renderer.domElement);
+
+// 轨道控制器（触控缩放/旋转/平移）
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.95, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.1;
+controls.minDistance = 0.5;
+controls.maxDistance = 5;
+controls.update();
 
 // ════════════════════════════════════════════════════════════
 // 8. 灯光
@@ -836,7 +854,7 @@ async function loadVRM(url) {
     // 缩放和位置
     vrm.scene.scale.set(1, 1, 1);
     vrm.scene.position.y = 0;
-    vrm.scene.rotation.y = 0;
+    vrm.scene.rotation.y = Math.PI; // 旋转面向相机
 
     // 启用阴影
     vrm.scene.traverse(obj => {
@@ -880,6 +898,9 @@ loadVRM(defaultVRMUrl);
 
 function animate() {
   requestAnimationFrame(animate);
+
+  // 更新轨道控制器
+  controls.update();
 
   // 更新 VRM
   if (vrm) {
