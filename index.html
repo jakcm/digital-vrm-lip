@@ -781,6 +781,7 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
+viewport.appendChild(renderer.domElement);
 
 // ════════════════════════════════════════════════════════════
 // 8. 灯光
