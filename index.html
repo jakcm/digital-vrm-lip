@@ -437,17 +437,25 @@ function buildVisemeItems(boundaries) {
 function getVRMMouthExpressions() {
   const em = vrm?.expressionManager;
   if (!em) return [];
-  // expressionManager 的 expressions 是一个 Map-like 对象
-  // 获取所有 expression 名称
-  const names = [];
-  if (em.expressions) {
-    for (const [name] of em.expressions) {
-      names.push(name);
+  const allNames = [];
+  try {
+    const exprs = em.expressions;
+    if (exprs) {
+      if (Array.isArray(exprs)) {
+        for (const e of exprs) { if (e?.expressionName) allNames.push(e.expressionName); }
+      } else if (typeof exprs === 'object') {
+        for (const key of Object.keys(exprs)) {
+          const e = exprs[key];
+          if (e?.expressionName) allNames.push(e.expressionName);
+        }
+      }
     }
+  } catch (e) {
+    console.warn('Failed to enumerate expressions:', e);
   }
   // 标准嘴型预设
   const mouthPresets = ['aa', 'ih', 'ou', 'oh', 'ee', 'JawOpen', 'a', 'i', 'u', 'e', 'o'];
-  return names.filter(n => mouthPresets.includes(n));
+  return allNames.filter(n => mouthPresets.includes(n));
 }
 
 function setMouthBlendShape(name, weight) {
@@ -789,7 +797,7 @@ async function loadVRM(url) {
       expressionManager = vrm.expressionManager;
       availableExpressions = getVRMMouthExpressions();
       setStatus(`VRM 加载完成 | ${availableExpressions.join(', ') || '未检测到 blendshape'}`);
-      console.log('VRM loaded, available expressions:', [...vrm.expressionManager.expressions.keys()]);
+      console.log('VRM loaded, available expressions:', availableExpressions);
     } else {
       setStatus('⚠️ VRM 无 ExpressionManager');
     }
@@ -943,7 +951,7 @@ window.__debug = {
   speakText,
   stopLipSync,
   vrm: () => vrm,
-  expressions: () => [...(vrm?.expressionManager?.expressions?.keys() || [])],
+  expressions: () => getVRMMouthExpressions(),
   applyViseme,
   resetAllMouth,
 };
