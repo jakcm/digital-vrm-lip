@@ -160,6 +160,7 @@
     <label style="flex:1">唇同步偏移 (ms)</label>
     <input id="cfg-offset" type="number" value="-80" style="width:70px">
   </div>
+  <button id="debug-lipsync-btn" style="padding:6px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:#aaa;cursor:pointer;font-size:12px">🎭 测试唇形同步（循环显示所有嘴型）</button>
   <div class="version">v20260710.000000</div>
 </div>
 
@@ -958,6 +959,31 @@ cfgVrmUrl.addEventListener('change', () => {
   }
   loadVRM(cfgVrmUrl.value || './default.vrm');
 });
+
+// 调试按钮：循环显示所有嘴型
+const $debugBtn = $('debug-lipsync-btn');
+if ($debugBtn) {
+  $debugBtn.addEventListener('click', async () => {
+    if (!vrm || !expressionManager) return;
+    const presets = getVRMMouthExpressions();
+    if (presets.length === 0) return;
+    $debugBtn.textContent = '🎭 测试中...';
+    $debugBtn.disabled = true;
+    for (let round = 0; round < 2; round++) {
+      for (const preset of presets) {
+        setMouthBlendShape(preset, 0.8);
+        setStatus(`🔬 测试嘴型: ${preset}=0.80`);
+        await new Promise(r => setTimeout(r, 400));
+        setMouthBlendShape(preset, 0);
+        await new Promise(r => setTimeout(r, 150));
+      }
+    }
+    resetAllMouth();
+    setStatus('✅ 唇形同步测试完成');
+    $debugBtn.textContent = '🎭 测试唇形同步（循环显示所有嘴型）';
+    $debugBtn.disabled = false;
+  });
+}
 
 // ════════════════════════════════════════════════════════════
 // 13. 初始化完成
