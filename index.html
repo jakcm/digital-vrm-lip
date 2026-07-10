@@ -443,25 +443,29 @@ function buildVisemeSchedule(boundaries) {
 }
 
 /**
- * 拉伸 viseme 时间轴到匹配音频总时长。
- * 解决中文 Edge TTS 的 word boundary 过于密集（所有口型在开头20%时间内跑完）、
- * 导致后面大部分时间嘴巴不动的痛点。
- * 策略：保留相对时间比例，但拉伸均匀到音频时长。
+ * 拉伸 viseme 时间轴到接近音频总时长。
+ * 保留相对时间比例，均匀拉伸到整个音频时长。
+ * 在末尾追加一个 sil（闭嘴）事件，确保音频结束前嘴巴自然闭合。
  */
 function stretchSchedule(schedule, audioDurMs) {
   if (schedule.length <= 1) return schedule;
   const rawEnd = schedule[schedule.length - 1].time;
   if (rawEnd <= 0) return schedule;
-  // 只拉伸第一个 viseme 之后的时间，保留第一个的起始偏移
   const firstTime = schedule[0].time;
   if (rawEnd <= firstTime) return schedule;
-  // 目标：口型活动占据音频的前 85%，剩 15% 闭嘴而不至于僵硬
-  const targetSpan = audioDurMs * 0.85;
+  // 目标：口型活动占据音频的前 98%，留 2% 缓冲
+  const targetSpan = audioDurMs * 0.98;
   const ratio = targetSpan / (rawEnd - firstTime);
-  return schedule.map((e, i) => ({
+  const stretched = schedule.map((e, i) => ({
     ...e,
     time: i === 0 ? e.time : Math.round(firstTime + (e.time - firstTime) * ratio),
   }));
+  // 在音频结束前 300ms 追加闭嘴事件，让嘴巴自然闭合
+  const closeTime = Math.round(audioDurMs) - 300;
+  if (closeTime > (stretched[stretched.length - 1]?.time || 0)) {
+    stretched.push({ time: closeTime, visemeType: 'sil' });
+  }
+  return stretched;
 }
 
 function buildEstimatedSchedule(text) {
@@ -572,9 +576,14 @@ function startLipSync(schedule, audioBuffer) {
   lipSyncRunning = true;
   isSpeaking = true;
 
-  // 计算总时长：给音频多 0.8s 来自然减速闭口
+  // 音频播放结束时自动关闭唇同步
+  source.onended = () => {
+    setTimeout(() => stopLipSync(), 300);
+  };
+
+  // 计算总时长
   speakingEndTime = audioStartTime + Math.max(audioBuffer.duration + 0.8,
-    schedule.length > 0 ? (schedule[schedule.length-1].time + 500) / 1000 : audioBuffer.duration + 0.8);
+    schedule.length > 0 ? (schedule[schedule.length-1].time + 300) / 1000 : audioBuffer.duration + 0.8);
 
   // 启动渲染循环
   lipSyncLoop();
