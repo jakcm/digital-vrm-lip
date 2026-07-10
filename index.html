@@ -412,27 +412,66 @@ function tokenizeForVisemes(word) {
   return tokens.length ? tokens : [word];
 }
 
-function buildVisemeItems(boundaries) {
+function buildVisemeSchedule(boundaries) {
   // boundaries: [{word, startMs, durMs}, ...]
-  // 返回: [{visemeType, startMs, durationMs}, ...]
-  const items = [];
+  // 返回: [{time, visemeType}] — 按时间排序的事件调度表
+  // 每个 viseme 从 time 开始一直保持到下一个事件的 time
+  const events = [];
   for (const b of boundaries) {
     const tokens = tokenizeForVisemes(b.word);
-    const totalDur = Math.max(b.durMs || 0, tokens.length * 70);
+    const totalDur = Math.max(b.durMs || 30, tokens.length * 60);
     const slot = totalDur / Math.max(tokens.length, 1);
     tokens.forEach((token, i) => {
       const start = Math.round(b.startMs + i * slot);
-      const dur = Math.max(60, Math.round(slot));
       const visemeType = visemeForToken(token);
-      items.push({ visemeType, startMs: start, durationMs: dur });
+      events.push({ time: start, visemeType });
     });
   }
-  // 结尾添加一段闭嘴时间
-  if (items.length > 0) {
-    const lastEnd = items[items.length-1].startMs + items[items.length-1].durationMs;
-    items.push({ visemeType: 'sil', startMs: lastEnd, durationMs: 200 });
+  if (events.length === 0) return events;
+  // 排序并按时间扩展：每个 viseme 从自己的 time 一直占用到下一个的 time
+  events.sort((a, b) => a.time - b.time);
+  // 去重：同一时间取最后一个
+  const deduped = [events[0]];
+  for (let i = 1; i < events.length; i++) {
+    if (events[i].time === deduped[deduped.length-1].time) {
+      deduped[deduped.length-1] = events[i];
+    } else {
+      deduped.push(events[i]);
+    }
   }
-  return items;
+  return deduped;
+}
+
+/**
+ * 拉伸 viseme 时间轴到匹配音频总时长。
+ * 解决中文 Edge TTS 的 word boundary 过于密集（所有口型在开头20%时间内跑完）、
+ * 导致后面大部分时间嘴巴不动的痛点。
+ * 策略：保留相对时间比例，但拉伸均匀到音频时长。
+ */
+function stretchSchedule(schedule, audioDurMs) {
+  if (schedule.length <= 1) return schedule;
+  const rawEnd = schedule[schedule.length - 1].time;
+  if (rawEnd <= 0) return schedule;
+  // 只拉伸第一个 viseme 之后的时间，保留第一个的起始偏移
+  const firstTime = schedule[0].time;
+  if (rawEnd <= firstTime) return schedule;
+  // 目标：口型活动占据音频的前 85%，剩 15% 闭嘴而不至于僵硬
+  const targetSpan = audioDurMs * 0.85;
+  const ratio = targetSpan / (rawEnd - firstTime);
+  return schedule.map((e, i) => ({
+    ...e,
+    time: i === 0 ? e.time : Math.round(firstTime + (e.time - firstTime) * ratio),
+  }));
+}
+
+function buildEstimatedSchedule(text) {
+  const chars = text.split('');
+  const perChar = 100; // ~100ms per char baseline
+  const events = chars.map((ch, i) => ({
+    time: Math.round(i * perChar),
+    visemeType: visemeForToken(ch),
+  }));
+  return events;
 }
 
 // 获取 VRM 上可用的 blendshape（兼容检查）
@@ -507,12 +546,13 @@ function getAudioContext() {
 
 let lipSyncRunning = false;
 let lipSyncRAF = null;
-let visemeItems = [];
-let audioStartTime = 0; // AudioContext.currentTime when playback started
-let lastActiveIndex = -1;
+let visemeSchedule = [];
+let audioStartTime = 0;
+let scheduleIndex = 0;
 let speakingEndTime = 0;
+let currentVisemeLate = 'sil';
 
-function startLipSync(items, audioBuffer) {
+function startLipSync(schedule, audioBuffer) {
   if (lipSyncRunning) stopLipSync();
   const ctx = getAudioContext();
   if (ctx.state === 'suspended') ctx.resume();
@@ -526,18 +566,15 @@ function startLipSync(items, audioBuffer) {
   audioStartTime = ctx.currentTime + 0.05; // 50ms 缓冲
   source.start(audioStartTime);
 
-  visemeItems = items;
-  lastActiveIndex = -1;
+  visemeSchedule = schedule;
+  scheduleIndex = 0;
+  currentVisemeLate = 'sil';
   lipSyncRunning = true;
   isSpeaking = true;
 
-  // 计算总时长
-  if (items.length > 0) {
-    const last = items[items.length-1];
-    speakingEndTime = audioStartTime + (last.startMs + last.durationMs + 300) / 1000;
-  } else {
-    speakingEndTime = audioStartTime + audioBuffer.duration + 0.5;
-  }
+  // 计算总时长：给音频多 0.8s 来自然减速闭口
+  speakingEndTime = audioStartTime + Math.max(audioBuffer.duration + 0.8,
+    schedule.length > 0 ? (schedule[schedule.length-1].time + 500) / 1000 : audioBuffer.duration + 0.8);
 
   // 启动渲染循环
   lipSyncLoop();
@@ -550,37 +587,27 @@ function lipSyncLoop() {
   const elapsedMs = (now - audioStartTime) * 1000;
 
   if (now >= speakingEndTime) {
-    // 结束
     stopLipSync();
     return;
   }
 
-  // 查找当前活动的 viseme
-  let activeIndex = -1;
-  for (let i = 0; i < visemeItems.length; i++) {
-    const item = visemeItems[i];
-    if (elapsedMs >= item.startMs && elapsedMs < item.startMs + item.durationMs) {
-      activeIndex = i;
+  // 推进到当前时间应该显示的 viseme
+  let newViseme = null;
+  while (scheduleIndex < visemeSchedule.length) {
+    const event = visemeSchedule[scheduleIndex];
+    if (elapsedMs >= event.time) {
+      newViseme = event.visemeType;
+      scheduleIndex++;
+    } else {
       break;
     }
   }
 
-  if (activeIndex !== lastActiveIndex) {
-    if (activeIndex >= 0) {
-      applyViseme(visemeItems[activeIndex].visemeType);
-    } else {
-      // 两个 viseme 之间的间隙 — 平滑归零
-      if (elapsedMs > 50) {
-        // 确保静音时闭嘴
-        if (elapsedMs < (visemeItems[0]?.startMs || Infinity) - 20) {
-          // 还没开始，什么都不做
-        } else if (lastActiveIndex >= 0) {
-          resetAllMouth();
-        }
-      }
-    }
-    lastActiveIndex = activeIndex;
+  if (newViseme !== null) {
+    currentVisemeLate = newViseme;
+    applyViseme(newViseme);
   }
+  // else: 保持上一个 viseme（没有空隙，不归零）
 
   lipSyncRAF = requestAnimationFrame(lipSyncLoop);
 }
@@ -590,8 +617,9 @@ function stopLipSync() {
   if (lipSyncRAF) { cancelAnimationFrame(lipSyncRAF); lipSyncRAF = null; }
   resetAllMouth();
   isSpeaking = false;
-  lastActiveIndex = -1;
-  visemeItems = [];
+  currentVisemeLate = 'sil';
+  scheduleIndex = 0;
+  visemeSchedule = [];
   updateSendBtn();
 }
 
@@ -612,30 +640,26 @@ async function speakText(text) {
     const result = await edgeTTSSpeak(text);
     const { boundaries, audioBuffer } = result;
 
-    // 2. word boundaries → viseme 序列
-    let items = [];
+    // 2. word boundaries → viseme 时间表
+    let schedule = [];
     if (boundaries.length > 0) {
-      items = buildVisemeItems(boundaries);
+      schedule = buildVisemeSchedule(boundaries);
     } else {
       // 没有 word boundary 时的兜底：根据文本长度估算
-      const durMs = audioBuffer.byteLength * 0.026;
-      const chars = text.split('');
-      const perChar = durMs / chars.length;
-      const estimated = chars.map((ch, i) => {
-        const visemeType = visemeForToken(ch);
-        return { visemeType, startMs: Math.round(i * perChar), durationMs: Math.max(60, Math.round(perChar)) };
-      });
-      estimated.push({ visemeType: 'sil', startMs: Math.round(durMs), durationMs: 200 });
-      items = estimated;
+      schedule = buildEstimatedSchedule(text);
     }
 
     // 3. 解码 MP3 → AudioBuffer
     const ctx = getAudioContext();
     const audioBuf = await ctx.decodeAudioData(audioBuffer.slice(0));
 
-    // 4. 启动唇同步 + 音频播放
-    startLipSync(items, audioBuf);
-    setStatus(`说话中... ${boundaries.length} 个词边界, ${items.length} 个 viseme`);
+    // 4. 拉伸 viseme 时间轴匹配音频时长
+    const audioDurMs = audioBuf.duration * 1000;
+    schedule = stretchSchedule(schedule, audioDurMs);
+
+    // 5. 启动唇同步 + 音频播放
+    startLipSync(schedule, audioBuf);
+    setStatus(`说话中... ${boundaries.length} 个词边界, ${schedule.length} 个 viseme`);
 
   } catch (err) {
     console.warn('Edge TTS failed (headless Chrome limitation, works in real browsers):', err);
@@ -648,32 +672,21 @@ async function speakText(text) {
       utterance.rate = 1.1;
       utterance.pitch = 1.0;
 
-      // 估算 viseme 节奏
-      const chars = text.split('');
-      const totalDur = Math.max(chars.length * 110, 800); // ~110ms per char, min 800ms
-      const perChar = totalDur / Math.max(chars.length, 1);
-      const estimatedItems = [];
-      chars.forEach((ch, i) => {
-        estimatedItems.push({
-          visemeType: visemeForToken(ch),
-          startMs: Math.round(i * perChar),
-          durationMs: Math.max(60, Math.round(perChar))
-        });
-      });
-      // 结尾闭嘴
-      const lastEnd = estimatedItems.length > 0 ?
-        estimatedItems[estimatedItems.length-1].startMs + estimatedItems[estimatedItems.length-1].durationMs : totalDur;
-      estimatedItems.push({ visemeType: 'sil', startMs: lastEnd, durationMs: 300 });
-
-      // 用 silent AudioBuffer 驱动唇同步计时器
+      // 估算 viseme 时间表，用 silent buffer 时长拉伸
+      const estimatedSchedule = buildEstimatedSchedule(text);
+      // silent buffer 时长：每个字约 130ms，最少 1.5s
+      const totalDur = Math.max(text.length * 130, 1500);
       const sr = ctx.sampleRate;
       const totalSamples = Math.round(sr * (totalDur + 500) / 1000);
       const silentBuf = ctx.createBuffer(1, totalSamples, sr);
-      startLipSync(estimatedItems, silentBuf);
+      const stretched = stretchSchedule(estimatedSchedule, totalDur);
+
+      // 用 silent AudioBuffer 驱动唇同步计时器
+      startLipSync(stretched, silentBuf);
 
       // 播放浏览器语音
       utterance.onstart = () => {
-        setStatus(`🔊 说话中... (${chars.length}字, 浏览器语音)`);
+        setStatus(`🔊 说话中... (${text.length}字, 浏览器语音)`);
       };
       utterance.onend = () => {
         setTimeout(() => {
