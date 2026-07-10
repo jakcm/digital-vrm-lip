@@ -1,0 +1,953 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+<title>🤖 Digital VRM LipSync</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; font-family: -apple-system,'PingFang SC','Microsoft YaHei',sans-serif; color: #eee; background: #1a1a2e; }
+
+  #viewport { position: absolute; inset: 0; overflow: hidden; }
+  #viewport canvas { width: 100% !important; height: 100% !important; display: block; }
+
+  /* Bottom gradient overlay */
+  #viewport::after {
+    content: ''; position: absolute; bottom: 0; left: 0; right: 0;
+    height: 180px;
+    background: linear-gradient(transparent 20%, rgba(0,0,0,0.5) 100%);
+    pointer-events: none; z-index: 2;
+  }
+
+  /* Loading overlay */
+  #loading {
+    position: absolute; inset: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 16px;
+    background: #1a1a2e; color: #888;
+    font-size: 16px; transition: opacity 0.6s;
+  }
+  #loading.done { opacity: 0; pointer-events: none; }
+  #loading .spinner {
+    width: 40px; height: 40px;
+    border: 3px solid #333; border-top-color: #6c63ff;
+    border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Status indicator */
+  #status {
+    position: absolute; top: 12px; left: 12px; z-index: 10;
+    font-size: 11px; color: rgba(255,255,255,0.35);
+    background: rgba(0,0,0,0.4); padding: 4px 10px;
+    border-radius: 6px; pointer-events: none;
+  }
+
+  /* Chat panel */
+  #chat-panel {
+    position: absolute; bottom: 0; left: 0; right: 0; z-index: 10;
+    pointer-events: none;
+  }
+  #chat-messages {
+    max-height: 40vh; overflow-y: auto;
+    padding: 12px 16px 6px;
+    display: flex; flex-direction: column; gap: 5px;
+    pointer-events: auto; background: transparent;
+    scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.06) transparent;
+  }
+  #chat-messages::-webkit-scrollbar { width: 3px; }
+  #chat-messages::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 3px; }
+
+  .msg {
+    max-width: 78%; padding: 7px 13px;
+    border-radius: 13px; font-size: 14px; line-height: 1.5;
+    word-break: break-word; animation: msgIn .3s ease-out;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: rgba(108,99,255,0.85); color: #fff;
+    border-bottom-right-radius: 4px;
+  }
+  .msg.assistant {
+    align-self: flex-start;
+    background: rgba(255,255,255,0.08); color: #ddd;
+    border-bottom-left-radius: 4px;
+  }
+  .msg.system {
+    align-self: center; font-size: 12px; color: rgba(255,255,255,0.35);
+    background: transparent; text-align: center;
+  }
+  @keyframes msgIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* Input area */
+  #input-area {
+    display: flex; gap: 8px;
+    padding: 8px 12px 16px;
+    pointer-events: auto;
+    background: linear-gradient(transparent, rgba(0,0,0,0.5) 60%);
+  }
+  #input-area input {
+    flex: 1; padding: 10px 14px; border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 10px; background: rgba(255,255,255,0.06);
+    color: #eee; font-size: 14px; outline: none;
+    transition: border-color 0.2s;
+  }
+  #input-area input:focus { border-color: rgba(108,99,255,0.5); }
+  #input-area input::placeholder { color: rgba(255,255,255,0.2); }
+  #input-area button {
+    padding: 10px 18px; border: none; border-radius: 10px;
+    background: #6c63ff; color: #fff; font-size: 14px; cursor: pointer;
+    transition: opacity 0.2s; white-space: nowrap;
+  }
+  #input-area button:disabled { opacity: 0.3; cursor: not-allowed; }
+  #input-area button:hover:not(:disabled) { background: #7b73ff; }
+
+  /* Settings toggle */
+  #settings-btn {
+    position: absolute; top: 12px; right: 12px; z-index: 10;
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08);
+    color: #aaa; font-size: 20px; width: 34px; height: 34px;
+    border-radius: 8px; cursor: pointer; pointer-events: auto;
+    transition: background 0.2s; display: flex; align-items: center; justify-content: center;
+  }
+  #settings-btn:hover { background: rgba(255,255,255,0.12); }
+
+  #settings-panel {
+    position: absolute; top: 52px; right: 12px; z-index: 20;
+    background: rgba(20,20,40,0.95); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 10px; padding: 14px; min-width: 260px;
+    display: none; flex-direction: column; gap: 10px;
+    pointer-events: auto; backdrop-filter: blur(8px);
+  }
+  #settings-panel.open { display: flex; }
+  #settings-panel label { font-size: 11px; color: rgba(255,255,255,0.4); }
+  #settings-panel input, #settings-panel select {
+    width: 100%; padding: 7px 10px; border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px; background: rgba(255,255,255,0.06);
+    color: #ddd; font-size: 13px; outline: none;
+  }
+  #settings-panel .row { display: flex; gap: 8px; align-items: center; }
+  #settings-panel .row input { flex: 1; }
+  #settings-panel .version { font-size: 10px; color: rgba(255,255,255,0.2); text-align: right; }
+
+  .speaking-indicator {
+    display: inline-block; width: 6px; height: 6px;
+    background: #6c63ff; border-radius: 50%;
+    animation: pulse 0.8s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
+</style>
+</head>
+<body>
+
+<div id="viewport"></div>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <span>加载 VRM 模型中...</span>
+</div>
+
+<div id="status">初始化中...</div>
+
+<button id="settings-btn">⚙</button>
+<div id="settings-panel">
+  <label>VRM 模型 URL</label>
+  <input id="cfg-vrm-url" value="./default.vrm" placeholder="VRM 模型 URL">
+  <label>OpenRouter API Key（可选 — 不填则只朗读输入文字）</label>
+  <input id="cfg-api-key" type="password" placeholder="sk-or-...">
+  <div class="row">
+    <label style="flex:1">唇同步偏移 (ms)</label>
+    <input id="cfg-offset" type="number" value="-80" style="width:70px">
+  </div>
+  <div class="version">v20260710.000000</div>
+</div>
+
+<div id="chat-panel">
+  <div id="chat-messages"></div>
+  <div id="input-area">
+    <input id="text-input" type="text" placeholder="输入文字后发送..." autocomplete="off">
+    <button id="send-btn">发送</button>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.149.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@1.0.9/lib/three-vrm.module.js"
+  }
+}
+</script>
+
+<script type="module">
+// ============================================================
+// Digital VRM LipSync — 完整实现
+// ============================================================
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+// ════════════════════════════════════════════════════════════
+// 1. DOM 引用
+// ════════════════════════════════════════════════════════════
+const $ = id => document.getElementById(id);
+const viewport = $('viewport');
+const loading = $('loading');
+const statusEl = $('status');
+const messagesEl = $('chat-messages');
+const textInput = $('text-input');
+const sendBtn = $('send-btn');
+const settingsBtn = $('settings-btn');
+const settingsPanel = $('settings-panel');
+const cfgVrmUrl = $('cfg-vrm-url');
+const cfgApiKey = $('cfg-api-key');
+const cfgOffset = $('cfg-offset');
+
+let vrm = null;
+let expressionManager = null;
+let availableExpressions = [];
+let isSpeaking = false;
+let isWaitingAI = false;
+let idleMixer = null;
+let idleAction = null;
+
+// ════════════════════════════════════════════════════════════
+// 2. Edge TTS 配置与函数（来自 digital-human 成熟实现）
+// ════════════════════════════════════════════════════════════
+const EDGE_TTS = {
+  TRUSTED_CLIENT_TOKEN: '6A5AA1D4EAFF4E9FB37E23D68491D6F4',
+  WSS_URL: 'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1',
+  VERSION_MS_GEC: '1-142.0.3595',
+};
+
+function edgeTTSGenerateUUID() {
+  return 'xxxxxxxx-xxxx-xxxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
+async function edgeTTSGenerateSecMsGec(token) {
+  const date = new Date();
+  const ticks = Math.floor(date.getTime() / 1000) + 11644473600;
+  const rounded = ticks - (ticks % 300);
+  const windowsTicks = rounded * 10000000;
+  const encoder = new TextEncoder();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(`${windowsTicks}${token}`));
+  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase();
+}
+
+function edgeTTSCreateSSML(text, voice) {
+  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="zh-CN"><voice name="${voice}"><prosody rate="0%" pitch="0Hz">${text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}</prosody></voice></speak>`;
+}
+
+function edgeTTSBuildConfig() {
+  const ts = new Date().toUTCString();
+  return `X-Timestamp:${ts}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":false,"wordBoundaryEnabled":true},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}`;
+}
+
+function edgeTTSFindAudio(arr) {
+  const needle = new TextEncoder().encode('Path:audio\r\n');
+  for (let i = 0; i <= arr.length - needle.length; i++) {
+    let match = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (arr[i + j] !== needle[j]) { match = false; break; }
+    }
+    if (match) return i + needle.length;
+  }
+  return -1;
+}
+
+function edgeTTSParseWordBoundary(textMsg) {
+  try {
+    const parts = textMsg.split('\r\n\r\n');
+    if (parts.length < 2) return null;
+    const json = JSON.parse(parts[parts.length - 1]);
+    let item = json;
+    if (Array.isArray(json.Metadata)) {
+      item = json.Metadata.find(m => String(m.Type || m.type || '').toLowerCase() === 'wordboundary');
+      if (!item) return null;
+    }
+    const eventType = String(item.Type || item.type || '').toLowerCase();
+    if (eventType !== 'wordboundary') return null;
+    let word, offset, duration;
+    if (item.Data && item.Data.text) {
+      word = item.Data.text.Text || item.Data.text.text;
+      offset = item.Data.Offset || 0;
+      duration = item.Data.Duration || 0;
+    } else {
+      word = item.Text || item.text || '';
+      offset = item.Offset !== undefined ? item.Offset : (item.offset || 0);
+      duration = item.Duration !== undefined ? item.Duration : (item.duration || 0);
+    }
+    const boundaryType = (item.Data?.text?.BoundaryType || item.boundaryType || '').toLowerCase();
+    if (boundaryType === 'sentence') return null;
+    if (!word || !word.trim()) return null;
+    return { word: word.trim(), startMs: offset / 10000, durMs: duration / 10000 };
+  } catch (e) {
+    return null;
+  }
+}
+
+async function edgeTTSSpeak(text) {
+  const voice = 'zh-CN-XiaoxiaoNeural';
+  const secMsGEC = await edgeTTSGenerateSecMsGec(EDGE_TTS.TRUSTED_CLIENT_TOKEN);
+  const reqId = edgeTTSGenerateUUID();
+  const url = `${EDGE_TTS.WSS_URL}?TrustedClientToken=${EDGE_TTS.TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC=${secMsGEC}&Sec-MS-GEC-Version=${EDGE_TTS.VERSION_MS_GEC}&ConnectionId=${reqId}`;
+
+  const ws = new WebSocket(url);
+  const audioChunks = [];
+  const boundaries = [];
+  let pendingReads = 0;
+
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { ws.close(); reject(new Error('Edge TTS timeout')); }, 30000);
+
+    ws.onopen = () => {
+      ws.send(edgeTTSBuildConfig());
+      ws.send(`X-RequestId:${reqId}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${new Date().toUTCString()}\r\nPath:ssml\r\n\r\n${edgeTTSCreateSSML(text, voice)}`);
+    };
+
+    ws.onmessage = (event) => {
+      if (typeof event.data === 'string') {
+        if (event.data.includes('Path:turn.end')) { ws.close(); return; }
+        const wb = edgeTTSParseWordBoundary(event.data);
+        if (wb) boundaries.push(wb);
+      } else {
+        pendingReads++;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const arr = new Uint8Array(reader.result);
+          const start = edgeTTSFindAudio(arr);
+          if (start !== -1) audioChunks.push(arr.slice(start));
+          pendingReads--;
+        };
+        reader.readAsArrayBuffer(event.data);
+      }
+    };
+
+    ws.onerror = () => { clearTimeout(timeout); reject(new Error('Edge TTS WebSocket error')); };
+    ws.onclose = () => {
+      clearTimeout(timeout);
+      const waitReads = () => {
+        if (pendingReads > 0) setTimeout(waitReads, 10);
+        else resolve();
+      };
+      waitReads();
+    };
+  });
+
+  const total = audioChunks.reduce((a, c) => a + c.length, 0);
+  const combined = new Uint8Array(total);
+  let off = 0;
+  for (const chunk of audioChunks) { combined.set(chunk, off); off += chunk.length; }
+  if (combined.length === 0) throw new Error('No audio received from Edge TTS');
+  return { audioBuffer: combined.buffer, boundaries };
+}
+
+// ════════════════════════════════════════════════════════════
+// 3. Viseme → VRM BlendShape 映射
+// ════════════════════════════════════════════════════════════
+
+// digital-human visemes → VRM 标准 blendshape 映射表
+const VISEME_MAP = {
+  'aa': { name: 'aa', weight: 0.80 },
+  'E':  { name: 'ee', weight: 0.75 },
+  'I':  { name: 'ih', weight: 0.70 },
+  'O':  { name: 'oh', weight: 0.75 },
+  'U':  { name: 'ou', weight: 0.65 },
+  'PP': { name: 'aa', weight: 0.45 },
+  'FF': { name: 'aa', weight: 0.30 },
+  'TH': { name: 'aa', weight: 0.40 },
+  'CH': { name: 'ih', weight: 0.45 },
+  'SS': { name: 'ih', weight: 0.35 },
+  'DD': { name: 'aa', weight: 0.50 },
+  'nn': { name: 'ih', weight: 0.45 },
+  'RR': { name: 'ou', weight: 0.40 },
+  'kk': { name: 'aa', weight: 0.40 },
+  'sil': null, // 全部归零
+};
+
+// CJK 汉字 → 交替映射到 5 个元音，避免连续汉字同嘴形
+function visemeForToken(token) {
+  const s = String(token || '').toLowerCase();
+  if (!s) return 'sil';
+  // 中文字符：按 charCode 交替映射
+  if (/^[\u4e00-\u9fff]$/.test(s)) {
+    return ['aa', 'E', 'I', 'O', 'U'][s.charCodeAt(0) % 5];
+  }
+  // 英文辅音/元音簇
+  if (/^(b|p|m)/.test(s)) return 'PP';
+  if (/^(f|v)/.test(s)) return 'FF';
+  if (/^th/.test(s)) return 'TH';
+  if (/^(ch|sh|j)/.test(s)) return 'CH';
+  if (/^(s|z|c|x)/.test(s)) return 'SS';
+  if (/^(d|t|l)/.test(s)) return 'DD';
+  if (/^n/.test(s)) return 'nn';
+  if (/^r/.test(s)) return 'RR';
+  if (/^(k|g|q)/.test(s)) return 'kk';
+  if (/[a]/.test(s)) return 'aa';
+  if (/[e]/.test(s)) return 'E';
+  if (/[i|y]/.test(s)) return 'I';
+  if (/[o]/.test(s)) return 'O';
+  if (/[u|w]/.test(s)) return 'U';
+  return 'aa';
+}
+
+function tokenizeForVisemes(word) {
+  const tokens = [];
+  const parts = String(word || '').match(/[\u4e00-\u9fff]|th|ch|sh|[a-zA-Z]+|\d/g) || [];
+  for (const part of parts) {
+    if (/^[a-zA-Z]+$/.test(part)) {
+      const clusters = part.match(/th|ch|sh|[bcdfghjklmnpqrstvwxyz]+|[aeiouy]+/gi) || [part];
+      tokens.push(...clusters);
+    } else {
+      tokens.push(part);
+    }
+  }
+  return tokens.length ? tokens : [word];
+}
+
+function buildVisemeItems(boundaries) {
+  // boundaries: [{word, startMs, durMs}, ...]
+  // 返回: [{visemeType, startMs, durationMs}, ...]
+  const items = [];
+  for (const b of boundaries) {
+    const tokens = tokenizeForVisemes(b.word);
+    const totalDur = Math.max(b.durMs || 0, tokens.length * 70);
+    const slot = totalDur / Math.max(tokens.length, 1);
+    tokens.forEach((token, i) => {
+      const start = Math.round(b.startMs + i * slot);
+      const dur = Math.max(60, Math.round(slot));
+      const visemeType = visemeForToken(token);
+      items.push({ visemeType, startMs: start, durationMs: dur });
+    });
+  }
+  // 结尾添加一段闭嘴时间
+  if (items.length > 0) {
+    const lastEnd = items[items.length-1].startMs + items[items.length-1].durationMs;
+    items.push({ visemeType: 'sil', startMs: lastEnd, durationMs: 200 });
+  }
+  return items;
+}
+
+// 获取 VRM 上可用的 blendshape（兼容检查）
+function getVRMMouthExpressions() {
+  const em = vrm?.expressionManager;
+  if (!em) return [];
+  // expressionManager 的 expressions 是一个 Map-like 对象
+  // 获取所有 expression 名称
+  const names = [];
+  if (em.expressions) {
+    for (const [name] of em.expressions) {
+      names.push(name);
+    }
+  }
+  // 标准嘴型预设
+  const mouthPresets = ['aa', 'ih', 'ou', 'oh', 'ee', 'JawOpen', 'a', 'i', 'u', 'e', 'o'];
+  return names.filter(n => mouthPresets.includes(n));
+}
+
+function setMouthBlendShape(name, weight) {
+  const em = vrm?.expressionManager;
+  if (!em) return;
+  // 先检查 expression 是否存在
+  try {
+    const expr = em.getExpression(name);
+    if (expr) {
+      em.setValue(name, weight);
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+function resetAllMouth() {
+  const names = ['aa', 'ih', 'ou', 'oh', 'ee', 'JawOpen', 'a', 'i', 'u', 'e', 'o'];
+  for (const n of names) {
+    setMouthBlendShape(n, 0);
+  }
+}
+
+// 应用一个 viseme 到 VRM blendshape
+function applyViseme(visemeType) {
+  resetAllMouth();
+  if (visemeType === 'sil') return;
+  const mapping = VISEME_MAP[visemeType];
+  if (mapping) {
+    // 直接设置 VRM 标准 blendshape
+    setMouthBlendShape(mapping.name, mapping.weight);
+  } else {
+    // 未知 viseme 类型，兜底用 aa
+    setMouthBlendShape('aa', 0.5);
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// 4. 音频播放 + 唇形同步调度器
+// ════════════════════════════════════════════════════════════
+
+let audioCtx = null;
+function getAudioContext() {
+  if (!audioCtx) audioCtx = new AudioContext();
+  return audioCtx;
+}
+
+let lipSyncRunning = false;
+let lipSyncRAF = null;
+let visemeItems = [];
+let audioStartTime = 0; // AudioContext.currentTime when playback started
+let lastActiveIndex = -1;
+let speakingEndTime = 0;
+
+function startLipSync(items, audioBuffer) {
+  if (lipSyncRunning) stopLipSync();
+  const ctx = getAudioContext();
+  if (ctx.state === 'suspended') ctx.resume();
+
+  // 创建音频源
+  const source = ctx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(ctx.destination);
+
+  // 启动
+  audioStartTime = ctx.currentTime + 0.05; // 50ms 缓冲
+  source.start(audioStartTime);
+
+  visemeItems = items;
+  lastActiveIndex = -1;
+  lipSyncRunning = true;
+  isSpeaking = true;
+
+  // 计算总时长
+  if (items.length > 0) {
+    const last = items[items.length-1];
+    speakingEndTime = audioStartTime + (last.startMs + last.durationMs + 300) / 1000;
+  } else {
+    speakingEndTime = audioStartTime + audioBuffer.duration + 0.5;
+  }
+
+  // 启动渲染循环
+  lipSyncLoop();
+}
+
+function lipSyncLoop() {
+  if (!lipSyncRunning) return;
+  const ctx = getAudioContext();
+  const now = ctx.currentTime;
+  const elapsedMs = (now - audioStartTime) * 1000;
+
+  if (now >= speakingEndTime) {
+    // 结束
+    stopLipSync();
+    return;
+  }
+
+  // 查找当前活动的 viseme
+  let activeIndex = -1;
+  for (let i = 0; i < visemeItems.length; i++) {
+    const item = visemeItems[i];
+    if (elapsedMs >= item.startMs && elapsedMs < item.startMs + item.durationMs) {
+      activeIndex = i;
+      break;
+    }
+  }
+
+  if (activeIndex !== lastActiveIndex) {
+    if (activeIndex >= 0) {
+      applyViseme(visemeItems[activeIndex].visemeType);
+    } else {
+      // 两个 viseme 之间的间隙 — 平滑归零
+      if (elapsedMs > 50) {
+        // 确保静音时闭嘴
+        if (elapsedMs < (visemeItems[0]?.startMs || Infinity) - 20) {
+          // 还没开始，什么都不做
+        } else if (lastActiveIndex >= 0) {
+          resetAllMouth();
+        }
+      }
+    }
+    lastActiveIndex = activeIndex;
+  }
+
+  lipSyncRAF = requestAnimationFrame(lipSyncLoop);
+}
+
+function stopLipSync() {
+  lipSyncRunning = false;
+  if (lipSyncRAF) { cancelAnimationFrame(lipSyncRAF); lipSyncRAF = null; }
+  resetAllMouth();
+  isSpeaking = false;
+  lastActiveIndex = -1;
+  visemeItems = [];
+  updateSendBtn();
+}
+
+// ════════════════════════════════════════════════════════════
+// 5. 主说话函数
+// ════════════════════════════════════════════════════════════
+
+async function speakText(text) {
+  if (!text || !text.trim() || isSpeaking) return;
+  text = text.trim();
+  isSpeaking = true;
+  updateSendBtn();
+
+  addMessage(text, 'user');
+
+  try {
+    // 1. Edge TTS → 获取 word boundaries + 音频
+    const result = await edgeTTSSpeak(text);
+    const { boundaries, audioBuffer } = result;
+
+    // 2. word boundaries → viseme 序列
+    let items = [];
+    if (boundaries.length > 0) {
+      items = buildVisemeItems(boundaries);
+    } else {
+      // 没有 word boundary 时的兜底：根据文本长度估算
+      const durMs = audioBuffer.byteLength * 0.026;
+      const chars = text.split('');
+      const perChar = durMs / chars.length;
+      const estimated = chars.map((ch, i) => {
+        const visemeType = visemeForToken(ch);
+        return { visemeType, startMs: Math.round(i * perChar), durationMs: Math.max(60, Math.round(perChar)) };
+      });
+      estimated.push({ visemeType: 'sil', startMs: Math.round(durMs), durationMs: 200 });
+      items = estimated;
+    }
+
+    // 3. 解码 MP3 → AudioBuffer
+    const ctx = getAudioContext();
+    const audioBuf = await ctx.decodeAudioData(audioBuffer.slice(0));
+
+    // 4. 启动唇同步 + 音频播放
+    startLipSync(items, audioBuf);
+    setStatus(`说话中... ${boundaries.length} 个词边界, ${items.length} 个 viseme`);
+
+  } catch (err) {
+    console.warn('Edge TTS failed:', err);
+    setStatus(`TTS 失败，重试中...`);
+    // 兜底：尝试 Web Speech Synthesis API
+    const ctx = getAudioContext();
+    try {
+      // 使用 SpeechSynthesis + 估算的 viseme 时间
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'zh-CN';
+      utterance.rate = 1.1;
+      // 估算 viseme
+      const estimatedItems = [];
+      const chars = text.split('');
+      const totalDur = chars.length * 100; // ~100ms per char
+      const perChar = totalDur / chars.length;
+      chars.forEach((ch, i) => {
+        estimatedItems.push({ visemeType: visemeForToken(ch), startMs: Math.round(i * perChar), durationMs: Math.max(60, Math.round(perChar)) });
+      });
+      estimatedItems.push({ visemeType: 'sil', startMs: totalDur, durationMs: 200 });
+
+      // 用 silent audio buffer 驱动时间
+      const sr = ctx.sampleRate;
+      const silentBuf = ctx.createBuffer(1, Math.round(sr * (totalDur + 200) / 1000), sr);
+      startLipSync(estimatedItems, silentBuf);
+
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(utterance);
+
+      utterance.onend = () => {
+        setTimeout(() => stopLipSync(), 300);
+      };
+    } catch (e2) {
+      console.error('Both TTS failed:', e2);
+      setStatus('语音合成失败');
+      isSpeaking = false;
+      updateSendBtn();
+    }
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// 6. 三种说话模式
+// ════════════════════════════════════════════════════════════
+
+// 模式 A：直接朗读文字
+async function speakInputText(text) {
+  await speakText(text);
+}
+
+// 模式 B：AI 对话
+async function speakWithAI(text) {
+  if (isWaitingAI) return;
+  isWaitingAI = true;
+  isSpeaking = true;
+  updateSendBtn();
+  setStatus('AI 思考中...');
+
+  try {
+    const apiKey = cfgApiKey.value.trim();
+    if (!apiKey) {
+      // 没配 API Key 就直接朗读
+      isWaitingAI = false;
+      await speakText(text);
+      return;
+    }
+
+    const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': window.location.origin,
+      },
+      body: JSON.stringify({
+        model: 'deepseek/deepseek-v4-flash',
+        messages: [
+          { role: 'system', content: '你是一个有趣的数字人助手，回答简洁生动，控制在 50 字以内。' },
+          { role: 'user', content: text },
+        ],
+        max_tokens: 128,
+        stream: false,
+      }),
+    });
+
+    if (!resp.ok) {
+      isWaitingAI = false;
+      await speakText(text);
+      return;
+    }
+
+    const data = await resp.json();
+    const reply = data.choices?.[0]?.message?.content?.trim() || text;
+    addMessage(reply, 'assistant');
+    isWaitingAI = false;
+    await speakText(reply);
+  } catch (err) {
+    console.warn('AI chat failed:', err);
+    isWaitingAI = false;
+    await speakText(text);
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// 7. Three.js VRM 场景
+// ════════════════════════════════════════════════════════════
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+const camera = new THREE.PerspectiveCamera(30, viewport.clientWidth / viewport.clientHeight, 0.1, 20);
+camera.position.set(0, 1.1, 2.2);
+camera.lookAt(0, 0.95, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+
+// ════════════════════════════════════════════════════════════
+// 8. 灯光
+// ════════════════════════════════════════════════════════════
+const ambientLight = new THREE.AmbientLight(0x404060, 0.6);
+scene.add(ambientLight);
+
+const sunLight = new THREE.DirectionalLight(0xFFEECC, 1.2);
+sunLight.position.set(1, 2, 2);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.width = 1024;
+sunLight.shadow.mapSize.height = 1024;
+scene.add(sunLight);
+
+const fillLight = new THREE.DirectionalLight(0x8888FF, 0.3);
+fillLight.position.set(-1, 0.5, -1);
+scene.add(fillLight);
+
+const hemiLight = new THREE.HemisphereLight(0x87CEEB, 0x3a3a5e, 0.6);
+scene.add(hemiLight);
+
+// ════════════════════════════════════════════════════════════
+// 9. 加载 VRM 模型
+// ════════════════════════════════════════════════════════════
+
+async function loadVRM(url) {
+  setStatus('加载 VRM 模型中...');
+  const loader = new GLTFLoader();
+  loader.register(parser => new VRMLoaderPlugin(parser));
+
+  try {
+    const gltf = await new Promise((resolve, reject) => {
+      loader.load(url, resolve, undefined, reject);
+    });
+
+    const loadedVrm = gltf.userData.vrm;
+    vrm = loadedVrm;
+
+    // 获取 expression manager
+    if (vrm.expressionManager) {
+      expressionManager = vrm.expressionManager;
+      availableExpressions = getVRMMouthExpressions();
+      setStatus(`VRM 加载完成 | ${availableExpressions.join(', ') || '未检测到 blendshape'}`);
+      console.log('VRM loaded, available expressions:', [...vrm.expressionManager.expressions.keys()]);
+    } else {
+      setStatus('⚠️ VRM 无 ExpressionManager');
+    }
+
+    // 添加到场景
+    scene.add(vrm.scene);
+
+    // 缩放和位置
+    vrm.scene.scale.set(1, 1, 1);
+    vrm.scene.position.y = 0;
+    vrm.scene.rotation.y = 0;
+
+    // 启用阴影
+    vrm.scene.traverse(obj => {
+      if (obj.isMesh) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      }
+    });
+
+    // 尝试加载 idle 动画 (optional)
+    try {
+      const vrmaUrl = url.replace('.vrm', '_idle.vrma');
+      const vrmaResp = await fetch(vrmaUrl, { method: 'HEAD' });
+      if (vrmaResp.ok) {
+        // 有 idle 动画文件，但简化处理就不加载了
+      }
+    } catch (e) {}
+
+    loading.classList.add('done');
+    setTimeout(() => loading.style.display = 'none', 600);
+
+    return vrm;
+  } catch (err) {
+    setStatus(`❌ VRM 加载失败: ${err.message}`);
+    loading.innerHTML = `
+      <div style="color:#ff6b6b;font-size:40px">⚠️</div>
+      <div style="color:#aaa">VRM 加载失败</div>
+      <div style="color:#666;font-size:13px;max-width:300px;text-align:center">${err.message}</div>
+    `;
+    throw err;
+  }
+}
+
+// 加载默认 VRM
+const defaultVRMUrl = cfgVrmUrl.value || './default.vrm';
+loadVRM(defaultVRMUrl);
+
+// ════════════════════════════════════════════════════════════
+// 10. 渲染循环
+// ════════════════════════════════════════════════════════════
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  // 更新 VRM
+  if (vrm) {
+    vrm.update(performance.now() / 1000);
+  }
+
+  renderer.render(scene, camera);
+}
+animate();
+
+// ════════════════════════════════════════════════════════════
+// 11. 窗口尺寸自适应
+// ════════════════════════════════════════════════════════════
+
+function onResize() {
+  const w = viewport.clientWidth;
+  const h = viewport.clientHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+window.addEventListener('resize', onResize);
+new ResizeObserver(onResize).observe(viewport);
+
+// ════════════════════════════════════════════════════════════
+// 12. UI 事件
+// ════════════════════════════════════════════════════════════
+
+function addMessage(text, role) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + role;
+  el.textContent = text;
+  messagesEl.appendChild(el);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function setStatus(text) {
+  statusEl.textContent = text;
+}
+
+function updateSendBtn() {
+  sendBtn.disabled = isSpeaking || isWaitingAI;
+  sendBtn.textContent = isWaitingAI ? '思考中...' : isSpeaking ? '说话中...' : '发送';
+}
+
+sendBtn.addEventListener('click', () => {
+  const text = textInput.value.trim();
+  if (!text || isSpeaking || isWaitingAI) return;
+  textInput.value = '';
+  speakWithAI(text);
+});
+
+textInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendBtn.click();
+  }
+});
+
+settingsBtn.addEventListener('click', () => {
+  settingsPanel.classList.toggle('open');
+});
+
+// 设置面板关闭（点击外部）
+document.addEventListener('click', (e) => {
+  if (!settingsPanel.contains(e.target) && e.target !== settingsBtn) {
+    settingsPanel.classList.remove('open');
+  }
+});
+
+// VRM URL 变更时重新加载
+cfgVrmUrl.addEventListener('change', () => {
+  if (vrm) {
+    scene.remove(vrm.scene);
+    VRMUtils.deepDispose(vrm.scene);
+    vrm = null;
+    expressionManager = null;
+  }
+  loadVRM(cfgVrmUrl.value || './default.vrm');
+});
+
+// ════════════════════════════════════════════════════════════
+// 13. 初始化完成
+// ════════════════════════════════════════════════════════════
+
+setStatus('初始化完成 | 输入文字后发送');
+
+console.log('🤖 Digital VRM LipSync initialized');
+console.log('📢 架构：Edge TTS word boundary → 定时 viseme 队列 → VRM BlendShape');
+console.log('💡 Edge TTS 完全免费，无需 API Key');
+console.log('🔑 如需 AI 对话，在设置中填入 OpenRouter API Key');
+
+// ════════════════════════════════════════════════════════════════════════════
+// 导出到 window 供调试
+// ════════════════════════════════════════════════════════════════════════════
+window.__debug = {
+  speakText,
+  stopLipSync,
+  vrm: () => vrm,
+  expressions: () => [...(vrm?.expressionManager?.expressions?.keys() || [])],
+  applyViseme,
+  resetAllMouth,
+};
+
+</script>
+</body>
+</html>
